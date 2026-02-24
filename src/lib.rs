@@ -1,1 +1,4 @@
-pub mod chip8;
+pub mod app;
+pub mod compiler;
+
+pub use app::{AppResult, Chip8App, DEFAULT_FRAMES, VmState};
