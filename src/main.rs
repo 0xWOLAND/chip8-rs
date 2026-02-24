@@ -22,6 +22,17 @@ enum Command {
     },
 }
 
+fn print_visualize_expectations(rom: &std::path::Path, cycles_per_frame: u32) {
+    println!("+--------------------------------------------------------------+");
+    println!("|                        CHIP-8 VISUALIZE                      |");
+    println!("+--------------------------------------------------------------+");
+    println!("| ROM: {:<56}|", rom.display());
+    println!("| CYCLES/FRAME: {:<47}|", cycles_per_frame.max(1));
+    println!("| EXPECTED: live, continuously updating WebGPU window          |");
+    println!("| CONTROLS: 1 2 3 4 / Q W E R / A S D F / Z X C V / ESC quit |");
+    println!("+--------------------------------------------------------------+");
+}
+
 fn run() -> AppResult<()> {
     match Cli::parse().command {
         Command::Compile { rom, out } => {
@@ -29,8 +40,9 @@ fn run() -> AppResult<()> {
             println!("{}", shader_path.display());
         }
         Command::Visualize { rom, frames } => {
-            let image_path = Chip8App::visualize_rom_file(&rom, frames)?;
-            println!("{}", image_path.display());
+            print_visualize_expectations(&rom, frames);
+            let output_path = Chip8App::visualize_rom_file(&rom, frames)?;
+            println!("{}", output_path.display());
         }
     }
     Ok(())

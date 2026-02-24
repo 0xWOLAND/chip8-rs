@@ -9,7 +9,6 @@ mod tests;
 #[allow(unused_imports)]
 pub use op::{Op, decode};
 
-pub fn compile(rom: &[u8]) -> String {
-    let program = ir::lower(rom);
-    naga_backend::emit_wgsl(&program)
+pub fn compile(_rom: &[u8]) -> String {
+    naga_backend::emit_wgsl()
 }

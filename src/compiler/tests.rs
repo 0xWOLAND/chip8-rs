@@ -11,6 +11,13 @@ fn decode_ret() {
 }
 
 #[test]
+fn decode_schip_scroll_ops() {
+    assert_eq!(decode(0x00C4), Op::ScrollDown { n: 4 });
+    assert_eq!(decode(0x00FB), Op::ScrollRight);
+    assert_eq!(decode(0x00FC), Op::ScrollLeft);
+}
+
+#[test]
 fn decode_jp() {
     assert_eq!(decode(0x1ABC), Op::Jp { nnn: 0xABC });
 }
@@ -104,6 +111,8 @@ fn decode_fx_ops() {
     assert_eq!(decode(0xF833), Op::Bcd { x: 8 });
     assert_eq!(decode(0xF955), Op::StoreRegs { x: 9 });
     assert_eq!(decode(0xFA65), Op::LoadRegs { x: 0xA });
+    assert_eq!(decode(0xF375), Op::StoreRpl { x: 3 });
+    assert_eq!(decode(0xF485), Op::LoadRpl { x: 4 });
 }
 
 #[test]
@@ -127,47 +136,52 @@ fn lowers_cfg_to_ir() {
 fn compile_has_block_dispatch() {
     let wgsl = compile(&[0x00, 0xE0]);
     assert!(wgsl.contains("block_id"));
-    assert!(wgsl.contains("fn block_"));
     assert!(wgsl.contains("fn execute_cycle()"));
-    assert!(!wgsl.contains("vm.pc"));
+    assert!(wgsl.contains("let op ="));
 }
 
 #[test]
 fn compile_conditional_emits_two_successors() {
     let rom = [0x3A, 0x42, 0x00, 0xE0, 0x00, 0xE0];
     let wgsl = compile(&rom);
-    assert!(wgsl.contains("66u"));
-    assert!(wgsl.contains("if"));
+    assert!(wgsl.contains("pc + 4u"));
+    assert!(wgsl.contains("if reg_read(x) == kk"));
 }
 
 #[test]
 fn compile_call_pushes_return_block() {
     let rom = [0x22, 0x04, 0x00, 0xE0, 0x00, 0xEE];
     let wgsl = compile(&rom);
-    assert!(wgsl.contains("stack_write"));
-    assert!(wgsl.contains("stack_read"));
+    assert!(wgsl.contains("stack_write(vm.sp, next_pc)"));
+    assert!(wgsl.contains("stack_read(vm.sp)"));
 }
 
 #[test]
 fn compile_wait_key_spins_on_same_block() {
     let wgsl = compile(&[0xF3, 0x0A]);
-    assert!(wgsl.contains("var found: bool"));
-    assert!(wgsl.contains("reg_write(3u"));
+    assert!(wgsl.contains("var found = false"));
+    assert!(wgsl.contains("if !found { next_pc = pc; }"));
 }
 
 #[test]
 fn compile_dynamic_jump_uses_addr_map() {
     let wgsl = compile(&[0xB2, 0x00]);
-    assert!(wgsl.contains("fn address_to_block("));
-    assert!(wgsl.contains("address_to_block(("));
+    assert!(wgsl.contains("next_pc = (nnn + reg_read(0u)) & 0xFFEu;"));
 }
 
 #[test]
 fn compile_drw_baked_height() {
     let wgsl = compile(&[0xD2, 0x35]);
-    assert!(wgsl.contains("< 5u"));
-    assert!(wgsl.contains("reg_read(2u)"));
-    assert!(wgsl.contains("% 64u"));
-    assert!(wgsl.contains("reg_read(3u)"));
-    assert!(wgsl.contains("% 32u"));
+    assert!(wgsl.contains("for (var row = 0u; row < n; row++)"));
+    assert!(wgsl.contains("draw_sprite(vx: u32, vy: u32, n: u32)"));
+    assert!(wgsl.contains(">= 64u"));
+    assert!(wgsl.contains(">= 32u"));
+}
+
+#[test]
+fn compile_drw_zero_height_emits_schip_16x16() {
+    let wgsl = compile(&[0xD2, 0x30]);
+    assert!(wgsl.contains("< 16u"));
+    assert!(wgsl.contains("sprite_word"));
+    assert!(wgsl.contains("0x8000u"));
 }

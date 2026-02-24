@@ -6,6 +6,9 @@ use crate::compiler::op::Op;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EffectIr {
     ClearDisplay,
+    ScrollDown { n: u8 },
+    ScrollRight,
+    ScrollLeft,
     SetRegImm { x: u8, kk: u8 },
     AddRegImm { x: u8, kk: u8 },
     SetRegReg { x: u8, y: u8 },
@@ -28,6 +31,8 @@ pub(crate) enum EffectIr {
     Bcd { x: u8 },
     StoreRegs { x: u8 },
     LoadRegs { x: u8 },
+    StoreRpl { x: u8 },
+    LoadRpl { x: u8 },
     Unknown { opcode: u16 },
 }
 
@@ -106,6 +111,9 @@ fn block_for(addr: u16, fallback: u32, addr_map: &HashMap<u16, u32>) -> u32 {
 fn lower_effect(op: &Op) -> Option<EffectIr> {
     match *op {
         Op::Cls => Some(EffectIr::ClearDisplay),
+        Op::ScrollDown { n } => Some(EffectIr::ScrollDown { n }),
+        Op::ScrollRight => Some(EffectIr::ScrollRight),
+        Op::ScrollLeft => Some(EffectIr::ScrollLeft),
         Op::LdByte { x, kk } => Some(EffectIr::SetRegImm { x, kk }),
         Op::AddByte { x, kk } => Some(EffectIr::AddRegImm { x, kk }),
         Op::LdReg { x, y } => Some(EffectIr::SetRegReg { x, y }),
@@ -128,6 +136,8 @@ fn lower_effect(op: &Op) -> Option<EffectIr> {
         Op::Bcd { x } => Some(EffectIr::Bcd { x }),
         Op::StoreRegs { x } => Some(EffectIr::StoreRegs { x }),
         Op::LoadRegs { x } => Some(EffectIr::LoadRegs { x }),
+        Op::StoreRpl { x } => Some(EffectIr::StoreRpl { x }),
+        Op::LoadRpl { x } => Some(EffectIr::LoadRpl { x }),
         Op::Unknown { opcode } => Some(EffectIr::Unknown { opcode }),
         _ => None,
     }

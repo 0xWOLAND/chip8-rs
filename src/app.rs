@@ -1,12 +1,16 @@
 use crate::compiler;
 use bytemuck::{Pod, Zeroable};
 use std::error::Error;
-use std::io::Write;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use wgpu::util::DeviceExt;
+use winit::event::{ElementState, Event, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::Window;
 
 pub type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
-pub const DEFAULT_FRAMES: u32 = 300;
+pub const DEFAULT_FRAMES: u32 = 1;
 const WIDTH: usize = 64;
 const HEIGHT: usize = 32;
 const PROGRAM_START: usize = 0x200;
@@ -30,6 +34,7 @@ pub struct VmState {
     pub sound_timer: u32,
     pub rng_state: u32,
     pub v: [u32; 4],
+    pub rpl: [u32; 2],
     pub stack: [u32; 8],
     pub memory: [u32; 1024],
 }
@@ -50,13 +55,14 @@ impl VmState {
         }
 
         Self {
-            block_id: 0,
+            block_id: PROGRAM_START as u32,
             i_reg: 0,
             sp: 0,
             delay_timer: 0,
             sound_timer: 0,
             rng_state: 0x1234_5678,
             v: [0; 4],
+            rpl: [0; 2],
             stack: [0; 8],
             memory: packed,
         }
@@ -87,9 +93,10 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
-    let x = min(63u, u32(in.uv.x * 64.0));
-    let y = min(31u, u32(in.uv.y * 32.0));
-    let on = f32(display[y * 64u + x]);
+    let uv = clamp(in.uv, vec2f(0.0, 0.0), vec2f(0.999999, 0.999999));
+    let x = u32(uv.x * 64.0);
+    let y = u32(uv.y * 32.0);
+    let on = select(0.0, 1.0, display[y * 64u + x] != 0u);
     return vec4f(on, on, on, 1.0);
 }
 "#;
@@ -119,21 +126,30 @@ impl Chip8App {
 
     pub fn visualize_rom_file(rom_path: &Path, frames: u32) -> AppResult<PathBuf> {
         let shader_path = Self::compile_rom_file(rom_path, None)?;
-        let stem = rom_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("rom");
-        let image_path = PathBuf::from("target")
-            .join("generated")
-            .join(format!("{stem}.ppm"));
-
+        let cycles_per_frame = frames.max(1);
         let shader_src = std::fs::read_to_string(&shader_path)?;
+        let shader_src = shader_src.replace(
+            "const CYCLES_PER_FRAME: u32 = 10u;",
+            &format!("const CYCLES_PER_FRAME: u32 = {cycles_per_frame}u;"),
+        );
         let rom = std::fs::read(rom_path)?;
         let vm = VmState::from_rom(&rom);
 
-        let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+        let event_loop = EventLoop::new()?;
+        let window = Arc::new(event_loop.create_window(
+            Window::default_attributes()
+                .with_title("chip8-frag")
+                .with_inner_size(winit::dpi::PhysicalSize::new(960u32, 480u32))
+                .with_resizable(true),
+        )?);
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let surface = instance.create_surface(window.clone())?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("chip8-device"),
@@ -143,6 +159,31 @@ impl Chip8App {
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
             }))?;
+        let size = window.inner_size();
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
+        } else {
+            caps.present_modes[0]
+        };
+        let alpha_mode = caps.alpha_modes[0];
+        let mut surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
 
         let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("compute-shader"),
@@ -157,12 +198,12 @@ impl Chip8App {
         let display_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("display"),
             contents: bytemuck::cast_slice(&vec![0u32; WIDTH * HEIGHT]),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         });
         let keypad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("keypad"),
             contents: bytemuck::cast_slice(&vec![0u32; 16]),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -288,7 +329,7 @@ impl Chip8App {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: surface_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -297,110 +338,170 @@ impl Chip8App {
             cache: None,
         });
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("frame-texture"),
-            size: wgpu::Extent3d {
-                width: WIDTH as u32,
-                height: HEIGHT as u32,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let readback_size = (WIDTH * HEIGHT * 4) as u64;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frame-readback"),
-            size: readback_size,
+        let mut keypad = [0u32; 16];
+        let display_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("display-readback"),
+            size: (WIDTH * HEIGHT * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let mut frame_counter: u64 = 0;
+        event_loop.run(move |event, target| {
+            target.set_control_flow(ControlFlow::Poll);
+            match event {
+                Event::WindowEvent { window_id, event } if window_id == window.id() => match event {
+                    WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::Resized(new_size) => {
+                        surface_config.width = new_size.width.max(1);
+                        surface_config.height = new_size.height.max(1);
+                        surface.configure(&device, &surface_config);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        queue.write_buffer(&keypad_buffer, 0, bytemuck::cast_slice(&keypad));
+                        frame_counter = frame_counter.wrapping_add(1);
 
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("compute-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&compute_pipeline);
-            pass.set_bind_group(0, &compute_group, &[]);
-            for _ in 0..frames {
-                pass.dispatch_workgroups(1, 1, 1);
-            }
-        }
+                        let frame = match surface.get_current_texture() {
+                            Ok(frame) => frame,
+                            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                                surface.configure(&device, &surface_config);
+                                return;
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                target.exit();
+                                return;
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => return,
+                            Err(wgpu::SurfaceError::Other) => return,
+                        };
+                        let view = frame
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("render-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&render_pipeline);
-            pass.set_bind_group(0, &render_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("frame-encoder"),
+                            });
+                        {
+                            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: Some("compute-pass"),
+                                timestamp_writes: None,
+                            });
+                            pass.set_pipeline(&compute_pipeline);
+                            pass.set_bind_group(0, &compute_group, &[]);
+                            pass.dispatch_workgroups(1, 1, 1);
+                        }
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("render-pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                            pass.set_pipeline(&render_pipeline);
+                            pass.set_bind_group(0, &render_group, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+                        let should_dump_ascii = frame_counter % 30 == 0;
+                        if should_dump_ascii {
+                            encoder.copy_buffer_to_buffer(
+                                &display_buffer,
+                                0,
+                                &display_readback,
+                                0,
+                                (WIDTH * HEIGHT * std::mem::size_of::<u32>()) as u64,
+                            );
+                        }
+                        queue.submit(Some(encoder.finish()));
+                        frame.present();
 
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some((WIDTH * 4) as u32),
-                    rows_per_image: Some(HEIGHT as u32),
+                        if should_dump_ascii {
+                            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                            let slice = display_readback.slice(..);
+                            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                            slice.map_async(wgpu::MapMode::Read, move |result| {
+                                tx.send(result).expect("map callback send failed");
+                            });
+                            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                            if rx.recv().expect("map callback recv failed").is_ok() {
+                                let bytes = slice.get_mapped_range();
+                                let pixels: &[u32] = bytemuck::cast_slice(&bytes);
+                                print_display_ascii(pixels);
+                                drop(bytes);
+                                display_readback.unmap();
+                            }
+                        }
+                    }
+                    WindowEvent::KeyboardInput { event, .. } => {
+                        if let PhysicalKey::Code(code) = event.physical_key {
+                            let value = match event.state {
+                                ElementState::Pressed => 1u32,
+                                ElementState::Released => 0u32,
+                            };
+                            if code == KeyCode::Escape && value == 1 {
+                                target.exit();
+                                return;
+                            }
+                            if let Some(index) = keycode_to_chip8(code) {
+                                keypad[index] = value;
+                            }
+                        }
+                    }
+                    _ => {}
                 },
-            },
-            wgpu::Extent3d {
-                width: WIDTH as u32,
-                height: HEIGHT as u32,
-                depth_or_array_layers: 1,
-            },
-        );
+                Event::AboutToWait => window.request_redraw(),
+                _ => {}
+            }
+        })?;
 
-        queue.submit(Some(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        Ok(shader_path)
+    }
+}
 
-        let slice = readback.slice(..);
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).expect("map callback send failed");
-        });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().expect("map callback recv failed")?;
-        let bytes = slice.get_mapped_range().to_vec();
-        readback.unmap();
-
-        if let Some(parent) = image_path.parent() {
-            std::fs::create_dir_all(parent)?;
+fn print_display_ascii(pixels: &[u32]) {
+    print!("\x1B[2J\x1B[H");
+    println!("DISPLAY BUFFER (64x32, #=on .=off)");
+    for y in 0..HEIGHT {
+        let mut line = String::with_capacity(WIDTH);
+        for x in 0..WIDTH {
+            let idx = y * WIDTH + x;
+            line.push(if pixels.get(idx).copied().unwrap_or(0) != 0 {
+                '#'
+            } else {
+                '.'
+            });
         }
-        let mut file = std::fs::File::create(&image_path)?;
-        write!(file, "P6\n{} {}\n255\n", WIDTH, HEIGHT)?;
-        for pixel in bytes.chunks_exact(4) {
-            file.write_all(&pixel[..3])?;
-        }
+        println!("{line}");
+    }
+}
 
-        Ok(image_path)
+fn keycode_to_chip8(key: KeyCode) -> Option<usize> {
+    match key {
+        KeyCode::Digit1 => Some(0x1),
+        KeyCode::Digit2 => Some(0x2),
+        KeyCode::Digit3 => Some(0x3),
+        KeyCode::Digit4 => Some(0xC),
+        KeyCode::KeyQ => Some(0x4),
+        KeyCode::KeyW => Some(0x5),
+        KeyCode::KeyE => Some(0x6),
+        KeyCode::KeyR => Some(0xD),
+        KeyCode::KeyA => Some(0x7),
+        KeyCode::KeyS => Some(0x8),
+        KeyCode::KeyD => Some(0x9),
+        KeyCode::KeyF => Some(0xE),
+        KeyCode::KeyZ => Some(0xA),
+        KeyCode::KeyX => Some(0x0),
+        KeyCode::KeyC => Some(0xB),
+        KeyCode::KeyV => Some(0xF),
+        _ => None,
     }
 }

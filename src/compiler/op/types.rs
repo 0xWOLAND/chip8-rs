@@ -1,6 +1,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     Cls,
+    ScrollDown { n: u8 },
+    ScrollRight,
+    ScrollLeft,
     Ret,
     Jp { nnn: u16 },
     Call { nnn: u16 },
@@ -34,5 +37,7 @@ pub enum Op {
     Bcd { x: u8 },
     StoreRegs { x: u8 },
     LoadRegs { x: u8 },
+    StoreRpl { x: u8 },
+    LoadRpl { x: u8 },
     Unknown { opcode: u16 },
 }

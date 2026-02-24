@@ -64,6 +64,11 @@ pub(super) fn build_blocks(rom: &[u8]) -> Vec<DecodedBlock> {
     let rom_end = rom_end_addr(rom);
     let mut leader_addrs = BTreeSet::new();
     leader_addrs.insert(ROM_START);
+    // Allow control flow (notably JP V0) to target any instruction boundary.
+    // This avoids mapping dynamic jumps to the wrong enclosing block.
+    for decoded in &decoded_rom {
+        leader_addrs.insert(decoded.addr);
+    }
 
     for decoded in &decoded_rom {
         let current = decoded.addr;
