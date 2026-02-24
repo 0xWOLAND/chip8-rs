@@ -167,7 +167,7 @@ impl Renderer {
         });
         let keypad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("keypad"),
-            contents: bytemuck::cast_slice(&vec![0u32; 16]),
+            contents: bytemuck::cast_slice(&[0u32; 16]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
