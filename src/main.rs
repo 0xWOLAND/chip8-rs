@@ -1,36 +1,11 @@
-use chip8_frag::{AppResult, Chip8App, DEFAULT_SHADER_FILE};
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use chip8_rs::{AppError, Chip8App};
+use std::path::Path;
 
-#[derive(Parser)]
-#[command(name = "chip8-frag")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    Compile {
-        out: Option<PathBuf>,
-    },
-    Visualize {
-        rom: PathBuf,
-    },
-}
-
-fn run() -> AppResult<()> {
-    match Cli::parse().command {
-        Command::Compile { out } => {
-            let shader_path = Chip8App::compile_shader_file(out.as_deref())?;
-            println!("{}", shader_path.display());
-        }
-        Command::Visualize { rom } => {
-            let _ = Chip8App::visualize_rom_file(&rom)?;
-            println!("{}", DEFAULT_SHADER_FILE);
-        }
-    }
-    Ok(())
+fn run() -> Result<(), AppError> {
+    let rom = std::env::args().nth(1).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "usage: chip8-rs <rom.ch8>")
+    })?;
+    Chip8App::run(Path::new(&rom))
 }
 
 fn main() {
