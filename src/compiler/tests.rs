@@ -122,19 +122,8 @@ fn decode_unknown() {
 }
 
 #[test]
-fn lowers_cfg_to_ir() {
-    let program = super::ir::lower(&[0x60, 0x01, 0x70, 0x01, 0x12, 0x00]);
-    assert!(!program.blocks.is_empty());
-    let first = &program.blocks[0];
-    assert!(matches!(
-        first.effects[0],
-        super::ir::EffectIr::SetRegImm { x: 0, kk: 1 }
-    ));
-}
-
-#[test]
 fn compile_has_block_dispatch() {
-    let wgsl = compile(&[0x00, 0xE0]);
+    let wgsl = compile();
     assert!(wgsl.contains("block_id"));
     assert!(wgsl.contains("fn execute_cycle()"));
     assert!(wgsl.contains("let op ="));
@@ -142,36 +131,34 @@ fn compile_has_block_dispatch() {
 
 #[test]
 fn compile_conditional_emits_two_successors() {
-    let rom = [0x3A, 0x42, 0x00, 0xE0, 0x00, 0xE0];
-    let wgsl = compile(&rom);
+    let wgsl = compile();
     assert!(wgsl.contains("pc + 4u"));
     assert!(wgsl.contains("if reg_read(x) == kk"));
 }
 
 #[test]
 fn compile_call_pushes_return_block() {
-    let rom = [0x22, 0x04, 0x00, 0xE0, 0x00, 0xEE];
-    let wgsl = compile(&rom);
+    let wgsl = compile();
     assert!(wgsl.contains("stack_write(vm.sp, next_pc)"));
     assert!(wgsl.contains("stack_read(vm.sp)"));
 }
 
 #[test]
 fn compile_wait_key_spins_on_same_block() {
-    let wgsl = compile(&[0xF3, 0x0A]);
+    let wgsl = compile();
     assert!(wgsl.contains("var found = false"));
     assert!(wgsl.contains("if !found { next_pc = pc; }"));
 }
 
 #[test]
 fn compile_dynamic_jump_uses_addr_map() {
-    let wgsl = compile(&[0xB2, 0x00]);
+    let wgsl = compile();
     assert!(wgsl.contains("next_pc = (nnn + reg_read(0u)) & 0xFFEu;"));
 }
 
 #[test]
 fn compile_drw_baked_height() {
-    let wgsl = compile(&[0xD2, 0x35]);
+    let wgsl = compile();
     assert!(wgsl.contains("for (var row = 0u; row < n; row++)"));
     assert!(wgsl.contains("draw_sprite(vx: u32, vy: u32, n: u32)"));
     assert!(wgsl.contains(">= 64u"));
@@ -180,7 +167,7 @@ fn compile_drw_baked_height() {
 
 #[test]
 fn compile_drw_zero_height_emits_schip_16x16() {
-    let wgsl = compile(&[0xD2, 0x30]);
+    let wgsl = compile();
     assert!(wgsl.contains("< 16u"));
     assert!(wgsl.contains("sprite_word"));
     assert!(wgsl.contains("0x8000u"));

@@ -10,7 +10,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
 pub type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
-pub const DEFAULT_FRAMES: u32 = 1;
+pub const DEFAULT_SHADER_FILE: &str = "target/generated/chip8.compute.wgsl";
 const WIDTH: usize = 64;
 const HEIGHT: usize = 32;
 const PROGRAM_START: usize = 0x200;
@@ -104,18 +104,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
 pub struct Chip8App;
 
 impl Chip8App {
-    pub fn compile_rom_file(rom_path: &Path, output_path: Option<&Path>) -> AppResult<PathBuf> {
-        let rom = std::fs::read(rom_path)?;
-        let shader = compiler::compile(&rom);
-        let stem = rom_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("rom");
-        let target = output_path.map(PathBuf::from).unwrap_or_else(|| {
-            PathBuf::from("target")
-                .join("generated")
-                .join(format!("{stem}.compute.wgsl"))
-        });
+    pub fn compile_shader_file(output_path: Option<&Path>) -> AppResult<PathBuf> {
+        let shader = compiler::compile();
+        let target = output_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SHADER_FILE));
 
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -124,13 +117,11 @@ impl Chip8App {
         Ok(target)
     }
 
-    pub fn visualize_rom_file(rom_path: &Path, frames: u32) -> AppResult<PathBuf> {
-        let shader_path = Self::compile_rom_file(rom_path, None)?;
-        let cycles_per_frame = frames.max(1);
-        let shader_src = std::fs::read_to_string(&shader_path)?;
+    pub fn visualize_rom_file(rom_path: &Path) -> AppResult<PathBuf> {
+        let shader_src = compiler::compile();
         let shader_src = shader_src.replace(
             "const CYCLES_PER_FRAME: u32 = 10u;",
-            &format!("const CYCLES_PER_FRAME: u32 = {cycles_per_frame}u;"),
+            &format!("const CYCLES_PER_FRAME: u32 = 1u;"),
         );
         let rom = std::fs::read(rom_path)?;
         let vm = VmState::from_rom(&rom);
@@ -339,13 +330,6 @@ impl Chip8App {
         });
 
         let mut keypad = [0u32; 16];
-        let display_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("display-readback"),
-            size: (WIDTH * HEIGHT * std::mem::size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut frame_counter: u64 = 0;
         event_loop.run(move |event, target| {
             target.set_control_flow(ControlFlow::Poll);
             match event {
@@ -358,7 +342,6 @@ impl Chip8App {
                     }
                     WindowEvent::RedrawRequested => {
                         queue.write_buffer(&keypad_buffer, 0, bytemuck::cast_slice(&keypad));
-                        frame_counter = frame_counter.wrapping_add(1);
 
                         let frame = match surface.get_current_texture() {
                             Ok(frame) => frame,
@@ -411,35 +394,8 @@ impl Chip8App {
                             pass.set_bind_group(0, &render_group, &[]);
                             pass.draw(0..3, 0..1);
                         }
-                        let should_dump_ascii = frame_counter % 30 == 0;
-                        if should_dump_ascii {
-                            encoder.copy_buffer_to_buffer(
-                                &display_buffer,
-                                0,
-                                &display_readback,
-                                0,
-                                (WIDTH * HEIGHT * std::mem::size_of::<u32>()) as u64,
-                            );
-                        }
                         queue.submit(Some(encoder.finish()));
                         frame.present();
-
-                        if should_dump_ascii {
-                            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-                            let slice = display_readback.slice(..);
-                            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                            slice.map_async(wgpu::MapMode::Read, move |result| {
-                                tx.send(result).expect("map callback send failed");
-                            });
-                            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-                            if rx.recv().expect("map callback recv failed").is_ok() {
-                                let bytes = slice.get_mapped_range();
-                                let pixels: &[u32] = bytemuck::cast_slice(&bytes);
-                                print_display_ascii(pixels);
-                                drop(bytes);
-                                display_readback.unmap();
-                            }
-                        }
                     }
                     WindowEvent::KeyboardInput { event, .. } => {
                         if let PhysicalKey::Code(code) = event.physical_key {
@@ -463,24 +419,7 @@ impl Chip8App {
             }
         })?;
 
-        Ok(shader_path)
-    }
-}
-
-fn print_display_ascii(pixels: &[u32]) {
-    print!("\x1B[2J\x1B[H");
-    println!("DISPLAY BUFFER (64x32, #=on .=off)");
-    for y in 0..HEIGHT {
-        let mut line = String::with_capacity(WIDTH);
-        for x in 0..WIDTH {
-            let idx = y * WIDTH + x;
-            line.push(if pixels.get(idx).copied().unwrap_or(0) != 0 {
-                '#'
-            } else {
-                '.'
-            });
-        }
-        println!("{line}");
+        Ok(PathBuf::from(DEFAULT_SHADER_FILE))
     }
 }
 
