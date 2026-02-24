@@ -1,4 +1,4 @@
 pub mod app;
-pub mod compiler;
+pub mod constants;
 
-pub use app::{AppResult, Chip8App, DEFAULT_SHADER_FILE, VmState};
+pub use app::{AppError, Chip8App, EmulatorState};
